@@ -1,0 +1,175 @@
+#include <windows.h>
+#include <commdlg.h>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+
+// Estrutura para armazenar os dados de cada registro do CSV
+struct Record {
+    std::string nome;
+    std::string localizacao;
+    std::string sku;
+    std::string gtin;
+};
+
+// Abre a caixa de diálogo para selecionar o arquivo CSV de entrada
+std::string GetOpenFileNameDialog()
+{
+    OPENFILENAME ofn;
+    char szFile[MAX_PATH] = "";
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = "Arquivos CSV (*.csv)\0*.csv\0Todos os Arquivos (*.*)\0*.*\0";
+    ofn.lpstrTitle = "Selecione o arquivo CSV";
+    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST;
+    if(GetOpenFileName(&ofn))
+        return std::string(szFile);
+    return "";
+}
+
+// Abre a caixa de diálogo para escolher onde salvar o arquivo ZPL de saída
+std::string GetSaveFileNameDialog()
+{
+    OPENFILENAME ofn;
+    char szFile[MAX_PATH] = "";
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = "Arquivos ZPL (*.zpl)\0*.zpl\0Arquivos de Texto (*.txt)\0*.txt\0Todos os Arquivos (*.*)\0*.*\0";
+    ofn.lpstrTitle = "Salvar arquivo ZPL";
+    ofn.Flags = OFN_EXPLORER | OFN_OVERWRITEPROMPT;
+    if(GetSaveFileName(&ofn))
+        return std::string(szFile);
+    return "";
+}
+
+// Função simples para dividir uma linha CSV (assume que não há vírgulas dentro dos campos)
+std::vector<std::string> SplitCSVLine(const std::string& line)
+{
+    std::vector<std::string> tokens;
+    std::istringstream ss(line);
+    std::string token;
+    while(std::getline(ss, token, ','))
+        tokens.push_back(token);
+    return tokens;
+}
+
+// Lê o arquivo CSV e retorna um vetor de registros
+std::vector<Record> ParseCSV(const std::string& filename)
+{
+    std::vector<Record> records;
+    std::ifstream file(filename);
+    if (!file.is_open())
+    {
+        std::cerr << "Erro ao abrir o arquivo CSV." << std::endl;
+        return records;
+    }
+    
+    std::string line;
+    // Lê a linha de cabeçalho (assumindo: nome,localização,sku,gtin)
+    if(!std::getline(file, line))
+        return records;
+    
+    // Lê cada linha de dados
+    while (std::getline(file, line))
+    {
+        auto tokens = SplitCSVLine(line);
+        if(tokens.size() < 4)
+            continue; // ignora linhas incompletas
+        
+        Record rec;
+        // Supondo que a ordem seja: nome, localização, sku, gtin
+        rec.nome = tokens[0];
+        rec.localizacao = tokens[1];
+        rec.sku = tokens[2];
+        rec.gtin = tokens[3];
+        records.push_back(rec);
+    }
+    return records;
+}
+
+int main()
+{
+    // Seleciona o arquivo CSV
+    std::string csvFile = GetOpenFileNameDialog();
+    if (csvFile.empty())
+    {
+        std::cout << "Nenhum arquivo CSV selecionado." << std::endl;
+        return 1;
+    }
+    
+    // Lê os registros do CSV
+    std::vector<Record> records = ParseCSV(csvFile);
+    if(records.empty())
+    {
+        std::cout << "Nenhum registro encontrado no CSV." << std::endl;
+        return 1;
+    }
+    
+    // Seleciona o arquivo de saída para o ZPL
+    std::string zplFile = GetSaveFileNameDialog();
+    if (zplFile.empty())
+    {
+        std::cout << "Nenhum arquivo de saída selecionado." << std::endl;
+        return 1;
+    }
+    
+    std::ofstream out(zplFile);
+    if (!out.is_open())
+    {
+        std::cout << "Erro ao abrir o arquivo de saída." << std::endl;
+        return 1;
+    }
+    
+    // Processa os registros em pares
+    // A cada par, gera uma etiqueta no seguinte formato:
+    //
+    // ^XA
+    // ^PW800
+    // ^LL400
+    // ^FO50,50^A0N,30,30^FD<DADOS DA LINHA 1>^FS
+    // ^FO50,100^BY2^BCN,80,Y,N,N^FD<CAMPO GTIN DA LINHA 1>^FS
+    // ^FO450,50^A0N,30,30^FD<DADOS DA LINHA 2>^FS
+    // ^FO450,100^BY2^BCN,80,Y,N,N^FD<CAMPO GTIN DA LINHA 2>^FS
+    // ^XZ
+    for (size_t i = 0; i < records.size(); i += 2)
+    {
+        // Prepara os dados da coluna esquerda (linha i)
+        Record left = records[i];
+        std::string leftDados = left.sku + " - " + left.localizacao + " | " + left.nome;
+        std::string leftGTIN = left.gtin;
+        
+        // Prepara os dados da coluna direita (linha i+1), se existir
+        std::string rightDados;
+        std::string rightGTIN;
+        if (i + 1 < records.size())
+        {
+            Record right = records[i + 1];
+            rightDados = right.sku + " - " + right.localizacao + " | " + right.nome;
+            rightGTIN = right.gtin;
+        }
+        
+        // Monta o ZPL conforme o template exigido
+        out << "^XA" << "\r\n";
+        out << "^PW800" << "\r\n";
+        out << "^LL400" << "\r\n";
+        out << "^FO50,50^A0N,30,30^FD" << leftDados << "^FS" << "\r\n";
+        out << "^FO50,100^BY2^BCN,80,Y,N,N^FD" << leftGTIN << "^FS" << "\r\n";
+        // Se existir registro para a coluna direita, insere os comandos
+        if (!rightDados.empty())
+        {
+            out << "^FO450,50^A0N,30,30^FD" << rightDados << "^FS" << "\r\n";
+            out << "^FO450,100^BY2^BCN,80,Y,N,N^FD" << rightGTIN << "^FS" << "\r\n";
+        }
+        out << "^XZ" << "\r\n\r\n";
+    }
+    
+    out.close();
+    std::cout << "Arquivo ZPL gerado com sucesso em: " << zplFile << std::endl;
+    return 0;
+}
